@@ -32,6 +32,7 @@ const {
   daemonRemoteFromStats,
   strictMode,
 } = require("./utils");
+const { resolveWriteMode, writeShim, verifyWriteMode } = require("./write-mode");
 
 async function run() {
   try {
@@ -88,8 +89,30 @@ async function run() {
     // Add to PATH
     core.addPath(toolDir);
 
+    // Fork: a write mode routes every kache process through a shim that sets
+    // the GitHub variables kache's remote-write policy reads (see write-mode.js).
+    const writeMode = resolveWriteMode({
+      trustedWriter: core.getBooleanInput("trusted-writer"),
+      writePrefix: core.getInput("write-prefix"),
+      basePrefix: core.getInput("s3-prefix") || "artifacts",
+      s3: isS3Configured(),
+      saveCache: core.getBooleanInput("save-cache"),
+      platform: os.platform(),
+    });
+    core.saveState("write-mode", writeMode.mode);
+
     // Set RUSTC_WRAPPER (kache.exe on Windows)
-    const kacheBin = path.join(toolDir, binaryName(os.platform()));
+    let kacheBin = path.join(toolDir, binaryName(os.platform()));
+    if (writeMode.mode !== "default") {
+      const shimDir = path.join(process.env.RUNNER_TEMP || os.tmpdir(), "kache-write-mode");
+      kacheBin = writeShim(shimDir, kacheBin, writeMode.env);
+      core.addPath(shimDir);
+      core.exportVariable("KACHE_ACTION_BIN", kacheBin);
+      core.info(
+        `Write mode: ${writeMode.mode}` +
+          (writeMode.pullRequestPrefix ? ` (writes ${writeMode.pullRequestPrefix})` : " (writes the base prefix)"),
+      );
+    }
     core.exportVariable("RUSTC_WRAPPER", kacheBin);
     core.info(`RUSTC_WRAPPER=${kacheBin}`);
 
@@ -293,6 +316,7 @@ async function run() {
           prefix: core.getInput("s3-prefix") || "artifacts",
           endpoint: core.getInput("s3-endpoint") || undefined,
           readonly: !saveCacheEnabled,
+          pullRequestPrefix: writeMode.pullRequestPrefix,
         }
       : null;
     if (s3) {
@@ -381,6 +405,29 @@ async function run() {
         core.warning(`Could not verify the daemon's effective remote: ${remote.detail}`);
       } else {
         core.info(`Daemon remote verified: ${remote.detail}`);
+      }
+      if (writeMode.mode !== "default") {
+        const parse = (out) => {
+          try {
+            return JSON.parse(out);
+          } catch {
+            return null;
+          }
+        };
+        const check = verifyWriteMode(writeMode.mode, {
+          doctor:
+            writeMode.mode === "trusted"
+              ? parse(await runKache(["doctor", "--json"], { quiet: true }))
+              : null,
+          status: parse(await runKache(["daemon", "status", "--json"], { quiet: true })),
+        });
+        if (!check.ok) {
+          throw new Error(
+            `kache did not take the ${writeMode.mode} write mode (${check.detail}); ` +
+              "refusing to continue with a cache that would never be written",
+          );
+        }
+        core.info(`Write mode verified: ${check.detail}`);
       }
     }
 

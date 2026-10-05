@@ -11,10 +11,14 @@ const {
   labelHeading,
   labelCurrentJobWindow,
   strictMode,
+  getTransferLogPath,
 } = require("./utils");
+const { countUploads, countSyncPushed, uploadCheck } = require("./write-mode");
 
 async function run() {
   const stopDaemon = core.getState("stop-daemon") === "true";
+  const writeMode = core.getState("write-mode") || "default";
+  let syncOutput = "";
   try {
     // Skip post step if [no-cache] was detected during setup
     if (core.getState("no-cache") === "true") {
@@ -43,7 +47,7 @@ async function run() {
       await runKache(saveArgs);
 
       core.info("Pushing cache to S3...");
-      await runKache(["sync", "--push"]);
+      syncOutput = await runKache(["sync", "--push"]);
     } else if (ghCache) {
       core.info("Saving cache to GitHub Actions cache...");
       await saveCache(core.getState("gh-cache-restored-key"));
@@ -165,6 +169,25 @@ async function run() {
       } catch (error) {
         core.warning(`Failed to stop job-scoped kache daemon: ${error.message}`);
       }
+    }
+    // Fork: read the logs after the daemon stopped and before its runtime
+    // directory goes. A writing job that compiled but published nothing fails.
+    if (writeMode !== "default") {
+      const read = (file) => {
+        try {
+          return fs.readFileSync(file, "utf8");
+        } catch {
+          return "";
+        }
+      };
+      const misses = parseEvents()?.misses ?? 0;
+      const uploads = countUploads(read(getTransferLogPath()));
+      const syncPushed = countSyncPushed(syncOutput);
+      core.info(
+        `Write mode ${writeMode}: ${misses} compiled, ${uploads} uploaded by the daemon, ${syncPushed} pushed by sync`,
+      );
+      const check = uploadCheck({ mode: writeMode, misses, uploads, syncPushed });
+      if (!check.ok) core.setFailed(check.detail);
     }
     if (ownedRuntimeDir) {
       try {
