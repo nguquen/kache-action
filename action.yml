@@ -4,7 +4,7 @@ author: "Zondax"
 
 inputs:
   version:
-    description: "Kache version to install (default: latest)"
+    description: "Kache version to install (default: latest). Fork (nguquen/kache-action): required with trusted-writer or write-prefix."
     required: false
   s3-bucket:
     description: "S3 bucket name for remote cache"
@@ -91,6 +91,18 @@ inputs:
   max-size:
     description: 'Max local kache store size before LRU eviction (e.g. "100GiB"). Maps to KACHE_MAX_SIZE. Default: 5% of the cache volume, between 5 GiB and 100 GiB. Controls the local store, not a remote/S3 cap.'
     required: false
+  trusted-writer:
+    description: "Fork (nguquen/kache-action): let this job write the base s3-prefix regardless of branch protection. Typically true only on the default branch. Mutually exclusive with write-prefix."
+    required: false
+    default: "false"
+  write-prefix:
+    description: "Fork (nguquen/kache-action): read s3-prefix first, then this prefix, and write only this prefix (kache's pull_request_prefix), on any event. Must not overlap s3-prefix."
+    required: false
+    default: ""
+  upload-wait-timeout:
+    description: "Fork (nguquen/kache-action): with trusted-writer or write-prefix, seconds the post step waits for kache's upload queue to empty before stopping the daemon (it also gives up after 60s without progress). kache's own stop allows only 30s and leaves the rest queued on the runner."
+    required: false
+    default: "600"
   strict:
     description: "Fail the step on anything the action would otherwise only warn about, such as a kache command that exits non-zero or a daemon remote it cannot verify. For CI that tests kache and the action together."
     required: false

@@ -110,10 +110,14 @@ async function downloadAndVerify(version, target) {
 
 /** Run a kache CLI command, returning stdout.
  *  Uses @actions/exec which calls execFile (array args, no shell injection). */
-async function runKache(args) {
+async function runKache(args, { quiet = false } = {}) {
   let stdout = "";
   let stderr = "";
-  const exitCode = await actionsExec.exec("kache", args, {
+  // Fork: KACHE_ACTION_BIN is the write-mode shim when one is in use, so the
+  // setup and post steps reach the same daemon the build does.
+  const bin = process.env.KACHE_ACTION_BIN || "kache";
+  const exitCode = await actionsExec.exec(bin, args, {
+    silent: quiet,
     listeners: {
       stdout: (data) => {
         stdout += data.toString();
@@ -124,7 +128,7 @@ async function runKache(args) {
     },
     ignoreReturnCode: true,
   });
-  if (exitCode !== 0) {
+  if (exitCode !== 0 && !quiet) {
     core.warning(`kache ${args.join(" ")} exited with code ${exitCode}`);
     if (stderr) core.warning(stderr);
   }
@@ -667,12 +671,13 @@ function clearEventLog() {
   }
 }
 
+function getTransferLogPath() {
+  return path.join(getRuntimeDir() || getCacheDir(), "transfers.jsonl");
+}
+
 /** Clear the transfer log so we only capture this run's transfers */
 function clearTransferLog() {
-  const logPath = path.join(
-    getRuntimeDir() || getCacheDir(),
-    "transfers.jsonl",
-  );
+  const logPath = getTransferLogPath();
   try {
     fs.writeFileSync(logPath, "");
     core.info("Cleared kache transfer log");
@@ -924,7 +929,14 @@ function tomlString(value) {
  *  Credentials are deliberately absent: the daemon inherits the masked
  *  credential env vars, and this file must stay safe to persist on shared
  *  runners. */
-function renderRemoteConfigToml({ bucket, region, prefix, endpoint, readonly }) {
+function renderRemoteConfigToml({
+  bucket,
+  region,
+  prefix,
+  endpoint,
+  readonly,
+  pullRequestPrefix,
+}) {
   const lines = [
     "# Written by kunobi-ninja/kache-action. The kache daemon does not inherit",
     "# KACHE_S3_* from the build environment (kunobi-ninja/kache#706), so the",
@@ -943,6 +955,10 @@ function renderRemoteConfigToml({ bucket, region, prefix, endpoint, readonly }) 
   );
   if (endpoint) {
     lines.push(`endpoint = ${tomlString(endpoint)}`);
+  }
+  // Fork (write-prefix): kache applies it only in a pull request job.
+  if (pullRequestPrefix) {
+    lines.push(`pull_request_prefix = ${tomlString(pullRequestPrefix)}`);
   }
   lines.push("");
   return lines.join("\n");
@@ -1067,6 +1083,7 @@ module.exports = {
   saveCache,
   clearEventLog,
   clearTransferLog,
+  getTransferLogPath,
   parseEvents,
   parseEventsFrom,
   formatBytes,
