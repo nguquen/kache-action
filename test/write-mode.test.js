@@ -15,6 +15,7 @@ const {
   verifyWriteMode,
   countUploads,
   countSyncPushed,
+  isPublishableMiss,
   uploadCheck,
   countQueuedUploads,
   waitForUploadQueue,
@@ -163,12 +164,20 @@ test("countSyncPushed reads kache sync's plan line", () => {
 });
 
 test("uploadCheck fails a writing job that compiled but published nothing", () => {
-  assert.equal(uploadCheck({ mode: "default", misses: 9, uploads: 0, syncPushed: 0 }).ok, true);
-  assert.equal(uploadCheck({ mode: "trusted", misses: 0, uploads: 0, syncPushed: 0 }).ok, true);
-  assert.equal(uploadCheck({ mode: "prefix", misses: 3, uploads: 0, syncPushed: 2 }).ok, true);
-  const failed = uploadCheck({ mode: "trusted", misses: 3, uploads: 0, syncPushed: 0 });
+  const m = (...names) => names.map((name) => ({ name }));
+  assert.equal(uploadCheck({ mode: "default", misses: m("a", "b"), uploads: 0, syncPushed: 0 }).ok, true);
+  assert.equal(uploadCheck({ mode: "trusted", misses: [], uploads: 0, syncPushed: 0 }).ok, true);
+  assert.equal(uploadCheck({ mode: "prefix", misses: m("a"), uploads: 0, syncPushed: 2 }).ok, true);
+  const failed = uploadCheck({ mode: "trusted", misses: m("a", "b", "build_script_run"), uploads: 0, syncPushed: 0 });
   assert.equal(failed.ok, false);
-  assert.match(failed.detail, /3 crate\(s\) compiled but nothing was uploaded/);
+  assert.match(failed.detail, /2 crate\(s\) compiled but nothing was uploaded/);
+});
+
+test("uploadCheck ignores build-script misses, which kache never publishes", () => {
+  const misses = [{ name: "build_script_build" }, { name: "build_script_run" }, { name: "build_script_run" }];
+  assert.equal(uploadCheck({ mode: "trusted", misses, uploads: 0, syncPushed: 0 }).ok, true);
+  assert.equal(isPublishableMiss("koki_media"), true);
+  assert.equal(isPublishableMiss(undefined), true);
 });
 
 test("countQueuedUploads counts jobs in every upload-queue spool", () => {

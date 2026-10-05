@@ -17,6 +17,7 @@ const {
 const {
   countUploads,
   countSyncPushed,
+  isPublishableMiss,
   uploadCheck,
   countQueuedUploads,
   waitForUploadQueue,
@@ -200,11 +201,12 @@ async function run() {
       if (abandoned > 0) {
         core.warning(`${abandoned} kache upload(s) were still queued when the daemon stopped and are lost with this runner`);
       }
-      const misses = parseEvents()?.misses ?? 0;
+      const events = parseEvents();
+      const misses = events?.missedCrates ?? [];
       const uploads = countUploads(read(getTransferLogPath()));
       const syncPushed = countSyncPushed(syncOutput);
       core.info(
-        `Write mode ${writeMode}: ${misses} compiled, ${uploads} uploaded by the daemon, ${syncPushed} pushed by sync`,
+        `Write mode ${writeMode}: ${misses.length} compiled (${misses.filter((m) => isPublishableMiss(m.name)).length} publishable), ${uploads} uploaded by the daemon, ${syncPushed} pushed by sync`,
       );
       const check = uploadCheck({ mode: writeMode, misses, uploads, syncPushed });
       if (!check.ok) core.setFailed(check.detail);

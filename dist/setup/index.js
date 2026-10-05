@@ -79246,15 +79246,24 @@ function countSyncPushed(syncOutput) {
   return match ? Number(match[1]) : 0;
 }
 
-/** A writing job that compiled something but published nothing means kache
- *  stopped honouring the mode, which would otherwise read as a cold cache. */
+/** kache keeps build-script compiles and runs in the local store only
+ *  (src/build_script.rs never enqueues an upload), so their misses say
+ *  nothing about whether the write mode took. */
+function isPublishableMiss(name) {
+  return !String(name || "").startsWith("build_script_");
+}
+
+/** A writing job that compiled something publishable but published nothing
+ *  means kache stopped honouring the mode, which would otherwise read as a
+ *  cold cache. `misses` is the parsed event list's missedCrates. */
 function uploadCheck({ mode, misses, uploads, syncPushed }) {
-  if (mode === "default" || !misses) return { ok: true };
+  const publishable = (misses || []).filter((m) => isPublishableMiss(m.name)).length;
+  if (mode === "default" || !publishable) return { ok: true };
   if (uploads + syncPushed > 0) return { ok: true };
   return {
     ok: false,
     detail:
-      `${misses} crate(s) compiled but nothing was uploaded in ${mode} write mode; ` +
+      `${publishable} crate(s) compiled but nothing was uploaded in ${mode} write mode; ` +
       "kache may have changed how it decides remote writes",
   };
 }
@@ -79328,6 +79337,7 @@ module.exports = {
   verifyWriteMode,
   countUploads,
   countSyncPushed,
+  isPublishableMiss,
   uploadCheck,
   countQueuedUploads,
   waitForUploadQueue,
