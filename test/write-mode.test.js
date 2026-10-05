@@ -16,6 +16,8 @@ const {
   countUploads,
   countSyncPushed,
   uploadCheck,
+  countQueuedUploads,
+  waitForUploadQueue,
 } = require("../src/write-mode");
 const { renderRemoteConfigToml } = require("../src/utils");
 
@@ -167,4 +169,46 @@ test("uploadCheck fails a writing job that compiled but published nothing", () =
   const failed = uploadCheck({ mode: "trusted", misses: 3, uploads: 0, syncPushed: 0 });
   assert.equal(failed.ok, false);
   assert.match(failed.detail, /3 crate\(s\) compiled but nothing was uploaded/);
+});
+
+test("countQueuedUploads counts jobs in every upload-queue spool", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kache-spool-"));
+  assert.equal(countQueuedUploads(dir), 0);
+  fs.mkdirSync(path.join(dir, "upload-queue"));
+  fs.mkdirSync(path.join(dir, "upload-queue-pr-1a2b3c4d"));
+  fs.mkdirSync(path.join(dir, "store"));
+  fs.writeFileSync(path.join(dir, "upload-queue", "a.json"), "{}");
+  fs.writeFileSync(path.join(dir, "upload-queue", ".tmp-x"), "");
+  fs.writeFileSync(path.join(dir, "upload-queue-pr-1a2b3c4d", "b.json"), "{}");
+  fs.writeFileSync(path.join(dir, "upload-queue-pr-1a2b3c4d", "c.json"), "{}");
+  fs.writeFileSync(path.join(dir, "store", "d.json"), "{}");
+  assert.equal(countQueuedUploads(dir), 3);
+  assert.equal(countQueuedUploads(path.join(dir, "missing")), 0);
+});
+
+function clockedWait(counts, opts) {
+  let t = 0;
+  const seq = [...counts];
+  return waitForUploadQueue("/x", {
+    pollMs: 1000,
+    count: () => (seq.length > 1 ? seq.shift() : seq[0]),
+    sleep: async (ms) => {
+      t += ms;
+    },
+    now: () => t,
+    ...opts,
+  });
+}
+
+test("waitForUploadQueue returns once the spool drains", async () => {
+  assert.equal(await clockedWait([5, 4, 2, 0], { timeoutMs: 60000 }), 0);
+  assert.equal(await clockedWait([0], { timeoutMs: 1 }), 0);
+});
+
+test("waitForUploadQueue gives up on timeout or a stalled queue", async () => {
+  assert.equal(await clockedWait([5, 4, 3, 3, 3, 3, 3, 3], { timeoutMs: 2000, stallMs: 60000 }), 3);
+  const logs = [];
+  const left = await clockedWait([5, 4, 4], { timeoutMs: 600000, stallMs: 3000, log: (m) => logs.push(m) });
+  assert.equal(left, 4);
+  assert.match(logs.at(-1), /stalled at 4/);
 });

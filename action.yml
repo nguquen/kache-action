@@ -99,6 +99,10 @@ inputs:
     description: "Fork (nguquen/kache-action): read s3-prefix first, then this prefix, and write only this prefix (kache's pull_request_prefix), on any event. Must not overlap s3-prefix."
     required: false
     default: ""
+  upload-wait-timeout:
+    description: "Fork (nguquen/kache-action): with trusted-writer or write-prefix, seconds the post step waits for kache's upload queue to empty before stopping the daemon (it also gives up after 60s without progress). kache's own stop allows only 30s and leaves the rest queued on the runner."
+    required: false
+    default: "600"
   strict:
     description: "Fail the step on anything the action would otherwise only warn about, such as a kache command that exits non-zero or a daemon remote it cannot verify. For CI that tests kache and the action together."
     required: false

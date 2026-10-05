@@ -79259,6 +79259,64 @@ function uploadCheck({ mode, misses, uploads, syncPushed }) {
   };
 }
 
+/** Upload jobs still in kache's durable spool (`upload-queue`, or
+ *  `upload-queue-pr-<hash>` under a write prefix). One file per job. */
+function countQueuedUploads(cacheDir) {
+  let total = 0;
+  let dirs;
+  try {
+    dirs = fs.readdirSync(cacheDir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const d of dirs) {
+    if (!d.isDirectory() || !d.name.startsWith("upload-queue")) continue;
+    try {
+      total += fs
+        .readdirSync(path.join(cacheDir, d.name), { withFileTypes: true })
+        .filter((f) => f.isFile() && !f.name.startsWith(".")).length;
+    } catch {
+      // vanished between listings
+    }
+  }
+  return total;
+}
+
+/** `daemon stop` gives queued uploads one shared 30s budget and then leaves
+ *  the rest in the spool for the next daemon, which on a CI runner never
+ *  comes. Wait for the spool to empty first, as long as it keeps shrinking.
+ *  Resolves to the number of jobs still queued. */
+async function waitForUploadQueue(
+  cacheDir,
+  { timeoutMs, stallMs = 60000, pollMs = 2000, count = countQueuedUploads, sleep, now = Date.now, log = () => {} },
+) {
+  const pause = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const start = now();
+  let queued = count(cacheDir);
+  let lowest = queued;
+  let lastProgress = start;
+  if (queued > 0) log(`Waiting for ${queued} queued kache upload(s)...`);
+  while (queued > 0) {
+    const t = now();
+    if (t - start >= timeoutMs) {
+      log(`Upload queue wait timed out after ${Math.round((t - start) / 1000)}s with ${queued} queued`);
+      break;
+    }
+    if (t - lastProgress >= stallMs) {
+      log(`Upload queue stalled at ${queued} for ${Math.round(stallMs / 1000)}s; giving up`);
+      break;
+    }
+    await pause(pollMs);
+    queued = count(cacheDir);
+    if (queued < lowest) {
+      lowest = queued;
+      lastProgress = now();
+    }
+  }
+  if (queued === 0) log(`Upload queue empty after ${Math.round((now() - start) / 1000)}s`);
+  return queued;
+}
+
 module.exports = {
   SHIM_NAME,
   normalizePrefix,
@@ -79271,6 +79329,8 @@ module.exports = {
   countUploads,
   countSyncPushed,
   uploadCheck,
+  countQueuedUploads,
+  waitForUploadQueue,
 };
 
 

@@ -12,8 +12,15 @@ const {
   labelCurrentJobWindow,
   strictMode,
   getTransferLogPath,
+  getCacheDir,
 } = require("./utils");
-const { countUploads, countSyncPushed, uploadCheck } = require("./write-mode");
+const {
+  countUploads,
+  countSyncPushed,
+  uploadCheck,
+  countQueuedUploads,
+  waitForUploadQueue,
+} = require("./write-mode");
 
 async function run() {
   const stopDaemon = core.getState("stop-daemon") === "true";
@@ -34,6 +41,15 @@ async function run() {
     if (!saveCacheEnabled) {
       core.info("Cache saving disabled (save-cache: false)");
     } else if (s3Configured) {
+      // Fork: let the daemon finish its background uploads before anything
+      // stops it; `daemon stop` alone abandons whatever 30s does not cover.
+      if (writeMode !== "default") {
+        const timeoutSecs = Number(core.getInput("upload-wait-timeout") || "600");
+        await waitForUploadQueue(getCacheDir(), {
+          timeoutMs: timeoutSecs * 1000,
+          log: (m) => core.info(m),
+        });
+      }
       // Save manifest first — records which keys were used + cost data for next warm
       const saveArgs = ["save-manifest"];
       const manifestKey = core.getInput("manifest-key");
@@ -180,6 +196,10 @@ async function run() {
           return "";
         }
       };
+      const abandoned = countQueuedUploads(getCacheDir());
+      if (abandoned > 0) {
+        core.warning(`${abandoned} kache upload(s) were still queued when the daemon stopped and are lost with this runner`);
+      }
       const misses = parseEvents()?.misses ?? 0;
       const uploads = countUploads(read(getTransferLogPath()));
       const syncPushed = countSyncPushed(syncOutput);
