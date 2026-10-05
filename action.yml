@@ -4,7 +4,7 @@ author: "Zondax"
 
 inputs:
   version:
-    description: "Kache version to install (default: latest)"
+    description: "Kache version to install (default: latest). Fork (nguquen/kache-action): required with trusted-writer or write-prefix."
     required: false
   s3-bucket:
     description: "S3 bucket name for remote cache"

@@ -2,7 +2,7 @@
 
 GitHub Action for [kache](https://github.com/kunobi-ninja/kache) — a content-addressed Rust build cache.
 
-> **Fork (`nguquen/kache-action`).** Identical to upstream except for two inputs that choose
+> **Fork (`nguquen/kache-action`).** Identical to upstream except for inputs that choose
 > where a job writes in the S3 remote without GitHub branch protection. See
 > [Fork: write modes](#fork-write-modes).
 
@@ -22,6 +22,7 @@ instead:
 ```yaml
 - uses: nguquen/kache-action@<sha>
   with:
+    version: v0.28.1
     s3-bucket: actions-cache
     s3-prefix: kache/my-repo/master
     s3-endpoint: https://<account>.r2.cloudflarestorage.com
@@ -43,11 +44,18 @@ real values. `write-prefix` is also written to the action's kache config file as
 **Checks.** After the daemon starts, setup fails unless kache took the mode: `kache doctor`
 must report `Remote writes: read-write` (trusted), or the daemon must listen on a
 prefix-scoped `daemon-pr-*.sock` (write-prefix). The post step fails a writing job that
-compiled crates but uploaded nothing. Either means a kache release changed how it decides
-remote writes — a red job instead of a silently cold cache.
+compiled crates but uploaded nothing (build-script misses do not count: kache never publishes
+them). Either means a kache release changed how it decides remote writes — a red job instead
+of a silently cold cache.
 
-Both inputs require an S3 remote and `save-cache: true`, are mutually exclusive, and are not
-supported on Windows. `write-prefix` must not overlap `s3-prefix` (kache rejects nested
+**Upload queue.** `kache daemon stop` gives queued uploads one shared 30s and leaves the rest
+in its spool for the next daemon, which a CI runner never starts. In a write mode the post step
+first waits for the spool to empty (`upload-wait-timeout`, default 600s, or 60s without
+progress), and warns about anything still queued after the stop.
+
+Both inputs require an explicit `version` (never latest — the overrides depend on kache
+behaviour that only a tested release guarantees), an S3 remote and `save-cache: true`, are
+mutually exclusive, and are not supported on Windows. `write-prefix` must not overlap `s3-prefix` (kache rejects nested
 prefixes), so use e.g. `kache/repo/master` and `kache/repo/branch`, not `kache/repo`.
 
 ## What is kache?

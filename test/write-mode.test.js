@@ -29,6 +29,7 @@ const base = {
   s3: true,
   saveCache: true,
   platform: "linux",
+  version: "v0.28.1",
 };
 
 test("no write-mode inputs keeps upstream behaviour", () => {
@@ -220,4 +221,13 @@ test("waitForUploadQueue gives up on timeout or a stalled queue", async () => {
   const left = await clockedWait([5, 4, 4], { timeoutMs: 600000, stallMs: 3000, log: (m) => logs.push(m) });
   assert.equal(left, 4);
   assert.match(logs.at(-1), /stalled at 4/);
+});
+
+test("write modes require an explicit kache version", () => {
+  for (const extra of [{ trustedWriter: true }, { writePrefix: "kache/repo/branch" }]) {
+    for (const version of ["", "  ", undefined]) {
+      assert.throws(() => resolveWriteMode({ ...base, ...extra, version }), /requires an explicit version/);
+    }
+  }
+  assert.equal(resolveWriteMode({ ...base, version: "" }).mode, "default");
 });

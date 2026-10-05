@@ -46,6 +46,18 @@ async function run() {
     const token = core.getInput("token");
     const target = getTarget();
 
+    // Fork: resolve the write mode before picking a version, so a write mode
+    // without a pinned version fails instead of fetching the latest release.
+    const writeMode = resolveWriteMode({
+      trustedWriter: core.getBooleanInput("trusted-writer"),
+      writePrefix: core.getInput("write-prefix"),
+      basePrefix: core.getInput("s3-prefix") || "artifacts",
+      s3: isS3Configured(),
+      saveCache: core.getBooleanInput("save-cache"),
+      platform: os.platform(),
+      version: core.getInput("version"),
+    });
+
     // Resolve version
     let version = core.getInput("version");
     if (!version) {
@@ -89,17 +101,10 @@ async function run() {
     // Add to PATH
     core.addPath(toolDir);
 
+    core.saveState("write-mode", writeMode.mode);
+
     // Fork: a write mode routes every kache process through a shim that sets
     // the GitHub variables kache's remote-write policy reads (see write-mode.js).
-    const writeMode = resolveWriteMode({
-      trustedWriter: core.getBooleanInput("trusted-writer"),
-      writePrefix: core.getInput("write-prefix"),
-      basePrefix: core.getInput("s3-prefix") || "artifacts",
-      s3: isS3Configured(),
-      saveCache: core.getBooleanInput("save-cache"),
-      platform: os.platform(),
-    });
-    core.saveState("write-mode", writeMode.mode);
 
     // Set RUSTC_WRAPPER (kache.exe on Windows)
     let kacheBin = path.join(toolDir, binaryName(os.platform()));

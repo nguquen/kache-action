@@ -46,6 +46,7 @@ function resolveWriteMode({
   s3,
   saveCache,
   platform,
+  version,
 }) {
   const prefix = normalizePrefix(writePrefix);
   if (!trustedWriter && !prefix) {
@@ -63,6 +64,11 @@ function resolveWriteMode({
   }
   if (platform === "win32") {
     throw new Error(`${input} is not supported on Windows runners`);
+  }
+  // The overrides lean on undocumented kache behaviour, so a write mode only
+  // runs the kache release it was tested with, never "latest".
+  if (!String(version || "").trim()) {
+    throw new Error(`${input} requires an explicit version (e.g. version: v0.28.1)`);
   }
   if (trustedWriter) {
     return {
