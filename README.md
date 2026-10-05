@@ -24,13 +24,13 @@ instead:
   with:
     version: v0.28.1
     s3-bucket: actions-cache
-    s3-prefix: kache/my-repo/master
+    s3-prefix: kache/master/my-repo
     s3-endpoint: https://<account>.r2.cloudflarestorage.com
     s3-region: auto
     s3-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
     s3-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
     trusted-writer: ${{ github.ref == 'refs/heads/master' }}
-    write-prefix: ${{ github.ref != 'refs/heads/master' && (github.ref_type == 'tag' && 'kache/my-repo/release' || 'kache/my-repo/branch') || '' }}
+    write-prefix: ${{ github.ref != 'refs/heads/master' && (github.ref_type == 'tag' && 'kache/release/my-repo' || 'kache/branch/my-repo') || '' }}
 ```
 
 **How.** kache reads `GITHUB_EVENT_NAME`, `GITHUB_REF_TYPE` and `GITHUB_REF_PROTECTED` to decide,
@@ -56,7 +56,11 @@ progress), and warns about anything still queued after the stop.
 Both inputs require an explicit `version` (never latest — the overrides depend on kache
 behaviour that only a tested release guarantees), an S3 remote and `save-cache: true`, are
 mutually exclusive, and are not supported on Windows. `write-prefix` must not overlap `s3-prefix` (kache rejects nested
-prefixes), so use e.g. `kache/repo/master` and `kache/repo/branch`, not `kache/repo`.
+prefixes), so use e.g. `kache/master/repo` and `kache/branch/repo`, not `kache/repo`.
+
+Putting the mode before the repo (`kache/branch/<repo>`) lets one bucket lifecycle rule on
+`kache/branch/` expire every repo's branch entries: S3 and R2 rule prefixes are literal, with no
+wildcards. kache never deletes remote objects (`docs/remote-cache/bounding.mdx`).
 
 ## What is kache?
 

@@ -82,6 +82,13 @@ test("write-prefix may not overlap the base prefix", () => {
   assert.equal(resolveWriteMode({ ...base, writePrefix: "kache/repo/master-pr" }).mode, "prefix");
   assert.ok(prefixesOverlap("", "anything"));
   assert.equal(normalizePrefix("  /a/b/ "), "a/b");
+  // Mode-first layout: one lifecycle rule on kache/branch/ covers every repo.
+  for (const writePrefix of ["kache/branch/repo", "kache/release/repo"]) {
+    assert.equal(
+      resolveWriteMode({ ...base, basePrefix: "kache/master/repo", writePrefix }).mode,
+      "prefix",
+    );
+  }
 });
 
 test("renderShim exports the overrides and execs the real binary", () => {
