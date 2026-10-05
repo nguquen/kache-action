@@ -2,6 +2,66 @@
 
 GitHub Action for [kache](https://github.com/kunobi-ninja/kache) — a content-addressed Rust build cache.
 
+> **Fork (`nguquen/kache-action`).** Identical to upstream except for inputs that choose
+> where a job writes in the S3 remote without GitHub branch protection. See
+> [Fork: write modes](#fork-write-modes).
+
+## Fork: write modes
+
+kache publishes to a remote only from a GitHub `push` to a **protected** branch
+(`is_trusted_github_writer` in kache's `src/policy.rs`), with no override. On a repo without
+branch protection every job is read-only, so nothing is ever written. Two inputs pick a mode
+instead:
+
+| Input | Reads | Writes |
+|---|---|---|
+| `trusted-writer: true` | `s3-prefix` | `s3-prefix` |
+| `write-prefix: <p>` | `s3-prefix`, then `<p>` | `<p>` only (kache's `pull_request_prefix`) |
+| neither | upstream behaviour | upstream behaviour |
+
+```yaml
+- uses: nguquen/kache-action@<sha>
+  with:
+    version: v0.28.1
+    s3-bucket: actions-cache
+    s3-prefix: kache/master/my-repo
+    s3-endpoint: https://<account>.r2.cloudflarestorage.com
+    s3-region: auto
+    s3-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+    s3-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    trusted-writer: ${{ github.ref == 'refs/heads/master' }}
+    write-prefix: ${{ github.ref != 'refs/heads/master' && (github.ref_type == 'tag' && 'kache/release/my-repo' || 'kache/branch/my-repo') || '' }}
+```
+
+**How.** kache reads `GITHUB_EVENT_NAME`, `GITHUB_REF_TYPE` and `GITHUB_REF_PROTECTED` to decide,
+and GitHub does not let a workflow overwrite `GITHUB_*` variables. So the action writes a shim
+named `kache` that exports the overrides and execs the real binary, and points `RUSTC_WRAPPER`
+and its own setup/post calls at it. Every kache process — the rustc wrapper, the daemon it
+spawns, `sync --push`, `daemon stop` — goes through the shim; the action's own process keeps the
+real values. `write-prefix` is also written to the action's kache config file as
+`pull_request_prefix`, which the daemon watches.
+
+**Checks.** After the daemon starts, setup fails unless kache took the mode: `kache doctor`
+must report `Remote writes: read-write` (trusted), or the daemon must listen on a
+prefix-scoped `daemon-pr-*.sock` (write-prefix). The post step fails a writing job that
+compiled crates but uploaded nothing (build-script misses do not count: kache never publishes
+them). Either means a kache release changed how it decides remote writes — a red job instead
+of a silently cold cache.
+
+**Upload queue.** `kache daemon stop` gives queued uploads one shared 30s and leaves the rest
+in its spool for the next daemon, which a CI runner never starts. In a write mode the post step
+first waits for the spool to empty (`upload-wait-timeout`, default 600s, or 60s without
+progress), and warns about anything still queued after the stop.
+
+Both inputs require an explicit `version` (never latest — the overrides depend on kache
+behaviour that only a tested release guarantees), an S3 remote and `save-cache: true`, are
+mutually exclusive, and are not supported on Windows. `write-prefix` must not overlap `s3-prefix` (kache rejects nested
+prefixes), so use e.g. `kache/master/repo` and `kache/branch/repo`, not `kache/repo`.
+
+Putting the mode before the repo (`kache/branch/<repo>`) lets one bucket lifecycle rule on
+`kache/branch/` expire every repo's branch entries: S3 and R2 rule prefixes are literal, with no
+wildcards. kache never deletes remote objects (`docs/remote-cache/bounding.mdx`).
+
 ## What is kache?
 
 [kache](https://github.com/kunobi-ninja/kache) is a zero-copy, content-addressed Rust build cache that drops in as your `RUSTC_WRAPPER`. It caches rustc compilation artifacts keyed by blake3 hashes of normalized rustc invocations, so cache keys stay portable across machines and checkouts. A few things make it fast:
