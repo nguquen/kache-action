@@ -156,9 +156,10 @@ test("verifyWriteMode reads doctor for trusted and the socket for prefix", () =>
   assert.equal(verifyWriteMode("default", {}).ok, true);
 });
 
-test("countUploads counts daemon upload events only", () => {
+test("countUploads counts successful daemon upload events only", () => {
   const raw = [
-    JSON.stringify({ direction: "upload", crate_name: "a" }),
+    JSON.stringify({ direction: "upload", crate_name: "a", ok: true }),
+    JSON.stringify({ direction: "upload", crate_name: "failed", ok: false }),
     JSON.stringify({ direction: "download", crate_name: "b" }),
     "not json",
     "",

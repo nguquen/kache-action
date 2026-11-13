@@ -147,13 +147,15 @@ function verifyWriteMode(mode, { doctor, status }) {
   return { ok: true, detail: "default mode" };
 }
 
-/** Count daemon uploads in kache's transfers.jsonl content. */
+/** Count successful daemon uploads in kache's transfers.jsonl content. A
+ *  failed upload is logged too, with `ok: false`, and published nothing. */
 function countUploads(rawTransfers) {
   let uploads = 0;
   for (const line of String(rawTransfers || "").split("\n")) {
     if (!line.trim()) continue;
     try {
-      if (JSON.parse(line).direction === "upload") uploads++;
+      const t = JSON.parse(line);
+      if (t.direction === "upload" && t.ok !== false) uploads++;
     } catch {
       // skip malformed lines
     }
