@@ -1,5 +1,7 @@
 const core = require("@actions/core");
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const {
   REPORT_HEADING,
   runKache,
@@ -18,15 +20,32 @@ const {
   countUploads,
   countSyncPushed,
   isPublishableMiss,
+  failedDownloads,
+  parseUploadCounters,
   uploadCheck,
+  renderWriteCheckSummary,
   countQueuedUploads,
   waitForUploadQueue,
 } = require("./write-mode");
+
+/** The daemon's upload counters, or null when kache cannot report them.
+ *  Must run while the daemon is still up: they are not on disk. */
+async function readUploadCounters() {
+  const dir = path.join(process.env.RUNNER_TEMP || os.tmpdir(), "kache-telemetry");
+  try {
+    await runKache(["telemetry", "write", dir]);
+    return parseUploadCounters(fs.readFileSync(path.join(dir, "metrics.otlp.json"), "utf8"));
+  } catch (error) {
+    core.info(`Could not read kache's upload counters: ${error.message}`);
+    return null;
+  }
+}
 
 async function run() {
   const stopDaemon = core.getState("stop-daemon") === "true";
   const writeMode = core.getState("write-mode") || "default";
   let syncOutput = "";
+  let jobSummaryEnabled = true;
   try {
     // Skip post step if [no-cache] was detected during setup
     if (core.getState("no-cache") === "true") {
@@ -151,7 +170,6 @@ async function run() {
     // Write the job summary unless explicitly disabled. commentBody from
     // `kache report` already carries its own "### kache build cache" title,
     // so only add a heading for the legacy fallback.
-    let jobSummaryEnabled = true;
     try {
       jobSummaryEnabled = core.getBooleanInput("job-summary");
     } catch {
@@ -179,6 +197,8 @@ async function run() {
     // A runtime directory the action created lives outside RUNNER_TEMP, so
     // nothing else removes it. Stop whatever daemon holds its sockets first.
     const ownedRuntimeDir = core.getState("runtime-dir-owned");
+    const checkWrites = writeMode !== "default" && core.getState("no-cache") !== "true";
+    const counters = checkWrites ? await readUploadCounters() : null;
     if (stopDaemon || ownedRuntimeDir) {
       try {
         core.info("Stopping job-scoped kache daemon...");
@@ -189,7 +209,7 @@ async function run() {
     }
     // Fork: read the logs after the daemon stopped and before its runtime
     // directory goes. A writing job that compiled but published nothing fails.
-    if (writeMode !== "default") {
+    if (checkWrites) {
       const read = (file) => {
         try {
           return fs.readFileSync(file, "utf8");
@@ -203,12 +223,38 @@ async function run() {
       }
       const events = parseEvents();
       const misses = events?.missedCrates ?? [];
-      const uploads = countUploads(read(getTransferLogPath()));
+      const transfers = read(getTransferLogPath());
+      const uploads = countUploads(transfers);
+      const failed = failedDownloads(transfers);
       const syncPushed = countSyncPushed(syncOutput);
+      const counts = counters
+        ? `${counters.skipped} skipped as already in the remote, ${counters.failed} failed, ${counters.suppressed} suppressed`
+        : "upload counters unavailable";
       core.info(
-        `Write mode ${writeMode}: ${misses.length} compiled (${misses.filter((m) => isPublishableMiss(m.name)).length} publishable), ${uploads} uploaded by the daemon, ${syncPushed} pushed by sync`,
+        `Write mode ${writeMode}: ${misses.length} compiled (${misses.filter((m) => isPublishableMiss(m.name)).length} publishable), ${uploads} uploaded by the daemon, ${syncPushed} pushed by sync, ${counts}; ${failed.length} failed download(s)`,
       );
-      const check = uploadCheck({ mode: writeMode, misses, uploads, syncPushed });
+      for (const f of failed) {
+        const compiled = misses.some((m) => m.cache_key && m.cache_key === f.cacheKey);
+        core.info(`Failed download: ${f.name} ${f.cacheKey.slice(0, 12)} after ${f.elapsedMs}ms${compiled ? ", then compiled" : ""}`);
+      }
+      const check = uploadCheck({
+        mode: writeMode,
+        misses,
+        uploads,
+        syncPushed,
+        uploadsSkipped: counters?.skipped ?? 0,
+        uploadsFailed: counters?.failed ?? 0,
+        uploadsSuppressed: counters?.suppressed ?? 0,
+      });
+      if (jobSummaryEnabled) {
+        try {
+          await core.summary
+            .addRaw(renderWriteCheckSummary({ mode: writeMode, misses, uploads, syncPushed, counters, failed, check }))
+            .write();
+        } catch (error) {
+          core.info(`Could not write the write check summary: ${error.message}`);
+        }
+      }
       if (!check.ok) core.setFailed(check.detail);
     }
     if (ownedRuntimeDir) {

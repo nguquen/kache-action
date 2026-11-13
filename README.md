@@ -48,6 +48,14 @@ compiled crates but uploaded nothing (build-script misses do not count: kache ne
 them). Either means a kache release changed how it decides remote writes — a red job instead
 of a silently cold cache.
 
+An upload the daemon skips because the key is already in the remote counts as a write: a
+failed download of an existing entry makes kache compile the crate and then skip its upload.
+kache counts skips only past its read-only gate, so a read-only daemon still reads 0. The
+counters live in the daemon's memory; the post step reads them with `kache telemetry write`
+before `daemon stop`. The step summary lists the counts (uploaded, pushed, skipped, failed,
+suppressed) and every failed download, with its key, how long kache waited, and whether the
+crate was then compiled.
+
 **Upload queue.** `kache daemon stop` gives queued uploads one shared 30s and leaves the rest
 in its spool for the next daemon, which a CI runner never starts. In a write mode the post step
 first waits for the spool to empty (`upload-wait-timeout`, default 600s, or 60s without

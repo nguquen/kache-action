@@ -17,6 +17,9 @@ const {
   countSyncPushed,
   isPublishableMiss,
   uploadCheck,
+  failedDownloads,
+  parseUploadCounters,
+  renderWriteCheckSummary,
   countQueuedUploads,
   waitForUploadQueue,
 } = require("../src/write-mode");
@@ -153,9 +156,10 @@ test("verifyWriteMode reads doctor for trusted and the socket for prefix", () =>
   assert.equal(verifyWriteMode("default", {}).ok, true);
 });
 
-test("countUploads counts daemon upload events only", () => {
+test("countUploads counts successful daemon upload events only", () => {
   const raw = [
-    JSON.stringify({ direction: "upload", crate_name: "a" }),
+    JSON.stringify({ direction: "upload", crate_name: "a", ok: true }),
+    JSON.stringify({ direction: "upload", crate_name: "failed", ok: false }),
     JSON.stringify({ direction: "download", crate_name: "b" }),
     "not json",
     "",
@@ -179,6 +183,91 @@ test("uploadCheck fails a writing job that compiled but published nothing", () =
   const failed = uploadCheck({ mode: "trusted", misses: m("a", "b", "build_script_run"), uploads: 0, syncPushed: 0 });
   assert.equal(failed.ok, false);
   assert.match(failed.detail, /2 crate\(s\) compiled but nothing was uploaded/);
+});
+
+test("uploadCheck passes a crate recompiled after a failed download of an existing entry", () => {
+  // The download of an entry already in the remote failed, kache compiled
+  // it, and the daemon skipped the upload.
+  const misses = [{ name: "my_crate", cache_key: "abc123def456" }];
+  const check = uploadCheck({ mode: "prefix", misses, uploads: 0, syncPushed: 0, uploadsSkipped: 1 });
+  assert.equal(check.ok, true);
+});
+
+test("uploadCheck still fails a real write stop", () => {
+  // A read-only daemon returns before it counts a skip, so a new crate
+  // compiled and nothing uploaded, pushed or skipped is a write stop.
+  const misses = [{ name: "other_crate", cache_key: "def456abc123" }];
+  const stopped = uploadCheck({ mode: "trusted", misses, uploads: 0, syncPushed: 0, uploadsSkipped: 0 });
+  assert.equal(stopped.ok, false);
+  assert.match(stopped.detail, /1 crate\(s\) compiled but nothing was uploaded in trusted write mode;/);
+  // Missing counters (older kache, unreachable daemon) count as no skips.
+  assert.equal(uploadCheck({ mode: "prefix", misses, uploads: 0, syncPushed: 0 }).ok, false);
+  const failing = uploadCheck({ mode: "prefix", misses, uploads: 0, syncPushed: 0, uploadsFailed: 2, uploadsSuppressed: 1 });
+  assert.equal(failing.ok, false);
+  assert.match(failing.detail, /\(2 upload\(s\) failed, 1 suppressed by the write breaker\)/);
+});
+
+test("failedDownloads follows kache report's failed-download rule", () => {
+  const raw = [
+    JSON.stringify({ direction: "download", crate_name: "ok", cache_key: "k1", ok: true, elapsed_ms: 900 }),
+    JSON.stringify({ direction: "download", crate_name: "my_crate", cache_key: "k2", ok: false, elapsed_ms: 2987 }),
+    JSON.stringify({ direction: "download", crate_name: "gone", cache_key: "k3", ok: false, outcome: "not_found" }),
+    JSON.stringify({ direction: "download", crate_name: "pf", cache_key: "k4", ok: false, outcome: "cancelled" }),
+    JSON.stringify({ direction: "download", crate_name: "pf", cache_key: "k5", ok: false, outcome: "error", elapsed_ms: 12 }),
+    JSON.stringify({ direction: "upload", crate_name: "up", cache_key: "k6", ok: false }),
+    "not json",
+  ].join("\n");
+  assert.deepEqual(failedDownloads(raw), [
+    { name: "my_crate", cacheKey: "k2", elapsedMs: 2987 },
+    { name: "pf", cacheKey: "k5", elapsedMs: 12 },
+  ]);
+  assert.deepEqual(failedDownloads(""), []);
+});
+
+test("parseUploadCounters reads kache telemetry's upload sum by result", () => {
+  // Shape of `kache telemetry write` (src/otel.rs, 0.28.1 and 2.1.1).
+  const point = (result, value) => ({
+    asInt: String(value),
+    timeUnixNano: "1",
+    startTimeUnixNano: "0",
+    attributes: [{ key: "kache.cache.result", value: { stringValue: result } }],
+  });
+  const body = {
+    resourceMetrics: [{
+      resource: { attributes: [] },
+      scopeMetrics: [{
+        scope: { name: "kache.cache" },
+        metrics: [
+          { name: "kache.cache.store.max", gauge: { dataPoints: [{ asInt: "5" }] } },
+          {
+            name: "kache.cache.uploads",
+            sum: {
+              aggregationTemporality: "AGGREGATION_TEMPORALITY_CUMULATIVE",
+              isMonotonic: true,
+              dataPoints: [point("completed", 3), point("failed", 0), point("skipped", 1), point("suppressed", 2), point("toString", 9)],
+            },
+          },
+        ],
+      }],
+    }],
+  };
+  assert.deepEqual(parseUploadCounters(JSON.stringify(body)), { completed: 3, failed: 0, skipped: 1, suppressed: 2 });
+  assert.equal(parseUploadCounters(JSON.stringify({ resourceMetrics: [] })), null);
+  assert.equal(parseUploadCounters("not json"), null);
+  assert.equal(parseUploadCounters(""), null);
+});
+
+test("renderWriteCheckSummary names failed downloads and the compiled ones", () => {
+  const misses = [{ name: "my_crate", cache_key: "abc123def4567890" }];
+  const failed = [{ name: "my_crate", cacheKey: "abc123def4567890", elapsedMs: 2987 }];
+  const counters = { completed: 0, failed: 0, skipped: 1, suppressed: 0 };
+  const md = renderWriteCheckSummary({ mode: "prefix", misses, uploads: 0, syncPushed: 0, counters, failed, check: { ok: true } });
+  assert.match(md, /kache write check \(prefix mode\): passed/);
+  assert.match(md, /\| Upload skipped, already in the remote \| 1 \|/);
+  assert.match(md, /\| `my_crate` \| `abc123def456` \| 2987ms \| compiled \|/);
+  const unknown = renderWriteCheckSummary({ mode: "trusted", misses, uploads: 0, syncPushed: 0, counters: null, failed: [], check: { ok: false, detail: "boom" } });
+  assert.match(unknown, /\| Upload skipped, already in the remote \| \? \|/);
+  assert.match(unknown, /failed\n[\s\S]*boom\n$/);
 });
 
 test("uploadCheck ignores build-script misses, which kache never publishes", () => {
