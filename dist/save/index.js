@@ -79259,19 +79259,110 @@ function isPublishableMiss(name) {
   return !String(name || "").startsWith("build_script_");
 }
 
+/** Downloads kache gave up on, from transfers.jsonl content: the same rule as
+ *  `kache report`'s "Failed downloads" (not ok, and not a clean miss, a
+ *  cancellation or a skip). kache then compiles the crate locally. */
+function failedDownloads(rawTransfers) {
+  const failed = [];
+  for (const line of String(rawTransfers || "").split("\n")) {
+    if (!line.trim()) continue;
+    let t;
+    try {
+      t = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (t.direction !== "download" || t.ok) continue;
+    if (["not_found", "cancelled", "skipped"].includes(t.outcome)) continue;
+    failed.push({
+      name: t.crate_name || "",
+      cacheKey: t.cache_key || "",
+      elapsedMs: t.elapsed_ms || 0,
+    });
+  }
+  return failed;
+}
+
+/** The daemon's upload counters from `kache telemetry write`'s
+ *  metrics.otlp.json (`kache.cache.uploads`, one data point per
+ *  `kache.cache.result`). They live only in the daemon's memory, so the file
+ *  has to be written before `daemon stop`. Returns { completed, failed,
+ *  skipped, suppressed }, or null when the metric is missing. */
+function parseUploadCounters(rawMetrics) {
+  let body;
+  try {
+    body = JSON.parse(String(rawMetrics || ""));
+  } catch {
+    return null;
+  }
+  for (const rm of body?.resourceMetrics || []) {
+    for (const sm of rm?.scopeMetrics || []) {
+      const metric = (sm?.metrics || []).find((m) => m?.name === "kache.cache.uploads");
+      if (!metric) continue;
+      const counters = { completed: 0, failed: 0, skipped: 0, suppressed: 0 };
+      for (const point of metric.sum?.dataPoints || metric.gauge?.dataPoints || []) {
+        const result = (point.attributes || []).find((a) => a.key === "kache.cache.result")
+          ?.value?.stringValue;
+        if (Object.hasOwn(counters, result)) counters[result] = Number(point.asInt ?? point.asDouble ?? 0) || 0;
+      }
+      return counters;
+    }
+  }
+  return null;
+}
+
 /** A writing job that compiled something publishable but published nothing
  *  means kache stopped honouring the mode, which would otherwise read as a
- *  cold cache. `misses` is the parsed event list's missedCrates. */
-function uploadCheck({ mode, misses, uploads, syncPushed }) {
+ *  cold cache. `misses` is the parsed event list's missedCrates.
+ *
+ *  `uploadsSkipped` counts uploads the daemon dropped because the key was
+ *  already in the remote. kache counts them only past its read-only gate, so
+ *  they prove the write path ran: a crate compiled after a failed download
+ *  of an existing entry is skipped, not uploaded, and must not fail the job.
+ *  A job kache keeps read-only never gets that far and still reads 0. */
+function uploadCheck({ mode, misses, uploads, syncPushed, uploadsSkipped = 0, uploadsFailed = 0, uploadsSuppressed = 0 }) {
   const publishable = (misses || []).filter((m) => isPublishableMiss(m.name)).length;
   if (mode === "default" || !publishable) return { ok: true };
-  if (uploads + syncPushed > 0) return { ok: true };
+  if (uploads + syncPushed + uploadsSkipped > 0) return { ok: true };
+  const unfinished = uploadsFailed + uploadsSuppressed > 0
+    ? ` (${uploadsFailed} upload(s) failed, ${uploadsSuppressed} suppressed by the write breaker)`
+    : "";
   return {
     ok: false,
     detail:
-      `${publishable} crate(s) compiled but nothing was uploaded in ${mode} write mode; ` +
+      `${publishable} crate(s) compiled but nothing was uploaded in ${mode} write mode${unfinished}; ` +
       "kache may have changed how it decides remote writes",
   };
+}
+
+/** Step summary section for the write check, so a failure names its cause. */
+function renderWriteCheckSummary({ mode, misses, uploads, syncPushed, counters, failed, check }) {
+  const publishable = (misses || []).filter((m) => isPublishableMiss(m.name)).length;
+  const compiledKeys = new Set((misses || []).map((m) => m.cache_key).filter(Boolean));
+  const n = (value) => (counters ? String(value) : "?");
+  const lines = [
+    `#### kache write check (${mode} mode): ${check.ok ? "passed" : "failed"}`,
+    "",
+    "| | |",
+    "|---|---:|",
+    `| Compiled (publishable) | ${(misses || []).length} (${publishable}) |`,
+    `| Uploaded by the daemon | ${uploads} |`,
+    `| Pushed by \`sync --push\` | ${syncPushed} |`,
+    `| Upload skipped, already in the remote | ${n(counters?.skipped)} |`,
+    `| Upload failed | ${n(counters?.failed)} |`,
+    `| Upload suppressed by the write breaker | ${n(counters?.suppressed)} |`,
+    `| Failed downloads | ${failed.length} |`,
+  ];
+  if (failed.length) {
+    lines.push("", "| Failed download | Key | After | Then |", "|---|---|---:|---|");
+    for (const f of failed) {
+      lines.push(
+        `| \`${f.name}\` | \`${f.cacheKey.slice(0, 12)}\` | ${f.elapsedMs}ms | ${compiledKeys.has(f.cacheKey) ? "compiled" : "-"} |`,
+      );
+    }
+  }
+  if (!check.ok) lines.push("", check.detail);
+  return lines.join("\n") + "\n";
 }
 
 /** Upload jobs still in kache's durable spool (`upload-queue`, or
@@ -79344,7 +79435,10 @@ module.exports = {
   countUploads,
   countSyncPushed,
   isPublishableMiss,
+  failedDownloads,
+  parseUploadCounters,
   uploadCheck,
+  renderWriteCheckSummary,
   countQueuedUploads,
   waitForUploadQueue,
 };
@@ -121344,6 +121438,8 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"5.
 var __webpack_exports__ = {};
 const core = __nccwpck_require__(37484);
 const fs = __nccwpck_require__(79896);
+const os = __nccwpck_require__(70857);
+const path = __nccwpck_require__(16928);
 const {
   REPORT_HEADING,
   runKache,
@@ -121362,15 +121458,32 @@ const {
   countUploads,
   countSyncPushed,
   isPublishableMiss,
+  failedDownloads,
+  parseUploadCounters,
   uploadCheck,
+  renderWriteCheckSummary,
   countQueuedUploads,
   waitForUploadQueue,
 } = __nccwpck_require__(31368);
+
+/** The daemon's upload counters, or null when kache cannot report them.
+ *  Must run while the daemon is still up: they are not on disk. */
+async function readUploadCounters() {
+  const dir = path.join(process.env.RUNNER_TEMP || os.tmpdir(), "kache-telemetry");
+  try {
+    await runKache(["telemetry", "write", dir]);
+    return parseUploadCounters(fs.readFileSync(path.join(dir, "metrics.otlp.json"), "utf8"));
+  } catch (error) {
+    core.info(`Could not read kache's upload counters: ${error.message}`);
+    return null;
+  }
+}
 
 async function run() {
   const stopDaemon = core.getState("stop-daemon") === "true";
   const writeMode = core.getState("write-mode") || "default";
   let syncOutput = "";
+  let jobSummaryEnabled = true;
   try {
     // Skip post step if [no-cache] was detected during setup
     if (core.getState("no-cache") === "true") {
@@ -121495,7 +121608,6 @@ async function run() {
     // Write the job summary unless explicitly disabled. commentBody from
     // `kache report` already carries its own "### kache build cache" title,
     // so only add a heading for the legacy fallback.
-    let jobSummaryEnabled = true;
     try {
       jobSummaryEnabled = core.getBooleanInput("job-summary");
     } catch {
@@ -121523,6 +121635,8 @@ async function run() {
     // A runtime directory the action created lives outside RUNNER_TEMP, so
     // nothing else removes it. Stop whatever daemon holds its sockets first.
     const ownedRuntimeDir = core.getState("runtime-dir-owned");
+    const checkWrites = writeMode !== "default" && core.getState("no-cache") !== "true";
+    const counters = checkWrites ? await readUploadCounters() : null;
     if (stopDaemon || ownedRuntimeDir) {
       try {
         core.info("Stopping job-scoped kache daemon...");
@@ -121533,7 +121647,7 @@ async function run() {
     }
     // Fork: read the logs after the daemon stopped and before its runtime
     // directory goes. A writing job that compiled but published nothing fails.
-    if (writeMode !== "default") {
+    if (checkWrites) {
       const read = (file) => {
         try {
           return fs.readFileSync(file, "utf8");
@@ -121547,12 +121661,38 @@ async function run() {
       }
       const events = parseEvents();
       const misses = events?.missedCrates ?? [];
-      const uploads = countUploads(read(getTransferLogPath()));
+      const transfers = read(getTransferLogPath());
+      const uploads = countUploads(transfers);
+      const failed = failedDownloads(transfers);
       const syncPushed = countSyncPushed(syncOutput);
+      const counts = counters
+        ? `${counters.skipped} skipped as already in the remote, ${counters.failed} failed, ${counters.suppressed} suppressed`
+        : "upload counters unavailable";
       core.info(
-        `Write mode ${writeMode}: ${misses.length} compiled (${misses.filter((m) => isPublishableMiss(m.name)).length} publishable), ${uploads} uploaded by the daemon, ${syncPushed} pushed by sync`,
+        `Write mode ${writeMode}: ${misses.length} compiled (${misses.filter((m) => isPublishableMiss(m.name)).length} publishable), ${uploads} uploaded by the daemon, ${syncPushed} pushed by sync, ${counts}; ${failed.length} failed download(s)`,
       );
-      const check = uploadCheck({ mode: writeMode, misses, uploads, syncPushed });
+      for (const f of failed) {
+        const compiled = misses.some((m) => m.cache_key && m.cache_key === f.cacheKey);
+        core.info(`Failed download: ${f.name} ${f.cacheKey.slice(0, 12)} after ${f.elapsedMs}ms${compiled ? ", then compiled" : ""}`);
+      }
+      const check = uploadCheck({
+        mode: writeMode,
+        misses,
+        uploads,
+        syncPushed,
+        uploadsSkipped: counters?.skipped ?? 0,
+        uploadsFailed: counters?.failed ?? 0,
+        uploadsSuppressed: counters?.suppressed ?? 0,
+      });
+      if (jobSummaryEnabled) {
+        try {
+          await core.summary
+            .addRaw(renderWriteCheckSummary({ mode: writeMode, misses, uploads, syncPushed, counters, failed, check }))
+            .write();
+        } catch (error) {
+          core.info(`Could not write the write check summary: ${error.message}`);
+        }
+      }
       if (!check.ok) core.setFailed(check.detail);
     }
     if (ownedRuntimeDir) {
